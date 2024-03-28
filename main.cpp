@@ -202,7 +202,7 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    openlog(*argv, 0, 0);
+    openlog(*argv, LOG_PID, 0);
     crc32::generate_table(crc32_table);
     check_integrity(directory, check_interval);
     closelog();
