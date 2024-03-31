@@ -8,24 +8,13 @@
 #include <string>
 #include <thread>
 
+#include <signal.h>
 #include <syslog.h>
 
 #include "crc32.h"
 
 using crc32_t = uint32_t;
 uint32_t crc32_table[256];
-
-
-volatile static std::sig_atomic_t signals_delivered = 0;
-volatile static std::sig_atomic_t terminated = 0;
-
-void handle_sigusr1(int) {
-    ++signals_delivered;
-}
-
-void handle_sigterm(int) {
-    terminated = 1;
-}
 
 
 char* get_cli_option(char ** begin, char ** end, const std::string& option) {
@@ -100,7 +89,7 @@ integrity_state_t calculate_sum_on_file(const std::string& filename) {
     return res;
 }
 
-std::map<std::string, integrity_state_t> collect_sums(const std::string& dir) {
+std::map<std::string, integrity_state_t> collect_states(const std::string& dir) {
     std::map<std::string, integrity_state_t> check_sums;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         check_sums[entry.path()] = calculate_sum_on_file(entry.path());
@@ -156,34 +145,72 @@ void validate_sums(const std::map<std::string, integrity_state_t>& old_states,
     }
 }
 
+void do_check(const std::map<std::string, integrity_state_t>& initial_states, const std::string& dir) {
+    auto current_states = collect_states(dir);
+    validate_sums(initial_states, current_states);
+}
+
 void check_integrity(const std::string& dir, int check_interval) {
-    std::map<std::string, integrity_state_t> initial_states = collect_sums(dir);
+    std::map<std::string, integrity_state_t> initial_states = collect_states(dir);
 
-    std::chrono::time_point<std::chrono::steady_clock> next_check = std::chrono::steady_clock::now() +
-        std::chrono::seconds(check_interval);
+    timer_t timerid;
+    sigevent sev;
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGALRM;
+    sev.sigev_value.sival_ptr = &timerid;
+    if (timer_create(CLOCK_REALTIME, &sev, &timerid) == -1) {
+        printf("timer_create failure, errno is %d\n", errno);
+        syslog(LOG_ERR, "timer_create failure");
+        exit(EXIT_FAILURE);
+    }
 
-    while (!terminated) {
-        if (signals_delivered > 0) {
-            --signals_delivered;
-        } else if (next_check <= std::chrono::steady_clock::now()) {
-            next_check = std::chrono::steady_clock::now() + std::chrono::seconds(check_interval);
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
+    itimerspec its;
+    its.it_value.tv_sec = check_interval;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = its.it_value.tv_sec;
+    its.it_interval.tv_nsec = 0;
+    if (timer_settime(timerid, 0, &its, NULL) == -1) {
+        printf("timer_settime failure, errno is %d\n", errno);
+        syslog(LOG_ERR, "timer_settime failure");
+        exit(EXIT_FAILURE);
+    }
+
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGTERM);
+    sigaddset(&set, SIGALRM);
+    sigaddset(&set, SIGQUIT);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGHUP);
+    if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
+        printf("pthread_sigmask failure, errno is %d\n", errno);
+        syslog(LOG_ERR, "pthread_sigmask failure");
+        exit(EXIT_FAILURE);
+    }
+
+    for (;;) {
+        int sig;
+        if (sigwait(&set, &sig) != 0) {
+            syslog(LOG_ERR, "sigwait failure");
+            exit(EXIT_FAILURE);
         }
 
-        auto current_states = collect_sums(dir);
-        validate_sums(initial_states, current_states);
+        switch (sig)
+        {
+        case SIGUSR1:
+        case SIGALRM:
+            do_check(initial_states, dir);
+            break;
+        case SIGTERM:
+            return;
+        default:
+            break;
+        }
     }
 }
 
 int main(int argc, char **argv) {
-    std::signal(SIGUSR1, handle_sigusr1);
-    std::signal(SIGTERM, handle_sigterm);
-    std::signal(SIGQUIT, SIG_IGN);
-    std::signal(SIGINT, SIG_IGN);
-    std::signal(SIGHUP, SIG_IGN);
-
     char* dir_arg = get_option(argc, argv, "-directory");
     if (!dir_arg) {
         printf("no target directory was found\n");
