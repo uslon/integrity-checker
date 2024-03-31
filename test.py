@@ -5,6 +5,7 @@ import subprocess
 import time
 import unittest
 
+TEXT_PATH = "text.txt"
 
 def get_last_syslog():
     syslog = subprocess.Popen(("cat", "/var/log/syslog"), stdout=subprocess.PIPE)
@@ -13,6 +14,12 @@ def get_last_syslog():
     return last_entry
 
 def do_cleanup(pid):
+    try:
+        os.chmod(TEXT_PATH, 777)
+        os.remove(TEXT_PATH)
+    except:
+        pass
+
     os.kill(pid, signal.SIGTERM)
     os.waitpid(pid, 0)
 
@@ -20,8 +27,7 @@ class Testing(unittest.TestCase):
     def test_all(self):
         subprocess.run(['make'])
 
-        text_path = "text.txt"
-        with open(text_path, "w+") as text_file:
+        with open(TEXT_PATH, "w+") as text_file:
             text_file.write("Test text.");
 
         pwd = os.getcwd()
@@ -37,7 +43,7 @@ class Testing(unittest.TestCase):
         self.assertTrue("OK" == last_entry[-1][:2])
 
 
-        with open(text_path, "w+") as text_file:
+        with open(TEXT_PATH, "w+") as text_file:
             text_file.write("Another test text.")
         os.kill(daemon.pid, signal.SIGUSR1)
         time.sleep(0.5)
@@ -50,7 +56,7 @@ class Testing(unittest.TestCase):
         self.assertTrue("differ:" in last_entry)
 
 
-        os.chmod(text_path, 000)
+        os.chmod(TEXT_PATH, 000)
         os.kill(daemon.pid, signal.SIGUSR1)
         time.sleep(0.5)
 
@@ -62,7 +68,7 @@ class Testing(unittest.TestCase):
         self.assertTrue("NOT_ACCESSIBLE)" in last_entry)
 
 
-        os.remove(text_path)
+        os.remove(TEXT_PATH)
         os.kill(daemon.pid, signal.SIGUSR1)
         time.sleep(0.5)
 
